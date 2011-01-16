@@ -1,5 +1,7 @@
 WBox changelog
 
+> WBox 5
+. License switch: GPLv2 -> New BSD
 > WBox 4
 . option "maxclients" to set max number of concurrent clients in server mode.
 . option "close" to close the connection after the few block of data was

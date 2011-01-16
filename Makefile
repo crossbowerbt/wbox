@@ -1,7 +1,7 @@
 # Makefile for wbox
 # Copyright (C) 2007 Salvatore Sanfilippo <antirez@invece.org>
 # All Rights Reserved
-# Under the GPL license version 2
+# Under the New BSD license
 
 DEBUG?= -g
 CFLAGS?= -O2 -Wall -W
