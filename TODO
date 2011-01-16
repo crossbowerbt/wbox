@@ -4,7 +4,6 @@ TODO list for WBox
 
 High priority
 
-. Ability to set cookies: cookie foo bar (even used multiple times)
 . $HOME/.wboxrc
 . Computer parsable output "type:reply|len:3234|time:3424|code:200..."
 . Write min/avg/max time on Ctrl+C and every N lines of output
@@ -18,7 +17,7 @@ Low priority
 == HTTP SERVER MODE ==
 
 High priority
-. Handle zero length (/proc filesystem) files
+. Handle zero length (/proc filesystem is a good example) files
 
 Low priority
 . Ability to "bind" commands to specific urls. For example using something
