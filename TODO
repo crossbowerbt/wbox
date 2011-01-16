@@ -6,18 +6,24 @@ High priority
 
 . $HOME/.wboxrc
 . Computer parsable output "type:reply|len:3234|time:3424|code:200..."
-. Write min/avg/max time on Ctrl+C and every N lines of output
+. Setting arbitrary header via "Headername: value"
 
 Low priority
 
 . Ability to follow links can be interesting, for example to generate a map
   of the site, check for broken links, and so on.
 . "color" option to use terminal colors to make the output more readable
+. Select segment size in timesplit mode.
+. POST method
+. Get urls from file, using the special url file:/tmp/filename.txt
+  and "randomize" option to request a different URL (from file:...)
+  for every request.
 
 == HTTP SERVER MODE ==
 
 High priority
 . Handle zero length (/proc filesystem is a good example) files
+. Handle clients in timeout
 
 Low priority
 . Ability to "bind" commands to specific urls. For example using something

@@ -1,7 +1,6 @@
 /* anet.c -- Basic TCP socket stuff
  * Copyright (C) 2006,2007 Salvatore Sanfilippo <antirez@invece.org> */
 
-#include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>

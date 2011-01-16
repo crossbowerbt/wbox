@@ -12,6 +12,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <errno.h>
 #include <ctype.h>
 #include <locale.h>
@@ -41,8 +42,9 @@
 #define WBOX_NOTUSED(V) ((void) V)
 
 /* Hardcoded stuff */
-#define WBOX_VERSION 3
+#define WBOX_VERSION 4
 #define WBOX_DEFAULT_SERVER_PORT 8081
+#define WBOX_DEFAULT_MAX_CLIENTS 20
 #define WBOX_RECV_BUF (1024*4)
 #define WBOX_TIMESPLIT_SAMPLES 40
 #define WBOX_COOKIES_MAX 20
@@ -69,6 +71,7 @@ typedef struct cookie {
 } cookie;
 
 typedef struct wconfig {
+    /* Configuration */
     char *url;
     char *host;
     char *webroot;
@@ -83,10 +86,19 @@ typedef struct wconfig {
     int timesplit;
     int maxreq;
     int http10;
-    int servermode;
-    int serverport;
+    int close;
     int cookies; /* number of set cookies */
     cookie cookie[WBOX_COOKIES_MAX];
+    /* Server mode configuration */
+    int servermode;
+    int serverport;
+    int maxclients;
+    /* Runtime state (client mode) */
+    int mintime, maxtime;
+    double timesum; /* average = timesum/timesum_samples */
+    int timesum_samples;
+    /* Runtime state (server mode) */
+    volatile sig_atomic_t activeclients;
 } wconfig;
 
 typedef struct timesplit {
@@ -125,6 +137,11 @@ typedef struct reqinfo {
     char *file;
 } reqinfo;
 
+
+/* Global vars */
+wconfig conf;
+
+/* ---------------------------- support functions --------------------------- */
 long long milliseconds(void)
 {
     struct timeval tmptv;
@@ -136,6 +153,13 @@ long long milliseconds(void)
 int strisnumber(char *s) {
     while(*s == ' ' || (*s >= '0' && *s <= '9')) s++;
     return *s == '\0';
+}
+
+static void setlowercase(char *p) {
+    while(*p) {
+        *p = tolower(*p);
+        p++;
+    }
 }
 
 /* string compare, case insensitive */
@@ -229,6 +253,7 @@ void freeUrl(urlinfo *ui) {
     if (ui->req) sdsfree(ui->req);
 }
 
+/* --------------------------------- HTTP client ---------------------------- */
 static char *createHttpReq(urlinfo *ui, int flags, cookie *cookie, int numcookies, char *referer)
 {
     char *r = sdsnew((flags&WBOX_USE_HEAD) ? "HEAD ":"GET ");
@@ -402,7 +427,7 @@ static int httpRequest(replyinfo *ri, char *ip, urlinfo *ui, wconfig *conf) {
             fflush(stdout);
         }
         totlen += nread;
-        if (!conf->dump && !conf->silent) {
+        if (!conf->dump && !conf->silent && conf->clients <= 1) {
             printf(WBOX_ANSI_CLEARLINE);
             printf("%d bytes readed",totlen);
             if (totlen == WBOX_RECV_BUF*4)
@@ -415,6 +440,7 @@ static int httpRequest(replyinfo *ri, char *ip, urlinfo *ui, wconfig *conf) {
             }
             fflush(stdout);
         }
+        if (conf->close && totlen == nread) break;
     }
     /* Done, close the socket and calculate timings */
     close(s);
@@ -422,49 +448,6 @@ static int httpRequest(replyinfo *ri, char *ip, urlinfo *ui, wconfig *conf) {
     ri->time = (int) (milliseconds()-stime);
     ri->replylen = totlen;
     return 0;
-}
-
-static void wboxHelp(void) {
-    printf(
-"Usage: wbox <url> [options ...]\n\n"
-"options list:\n\n"
-"<number>             - stop after <number> requests\n"
-"compr                - send Accept-Encoding: gzip,deflate in request\n"
-"showhdr              - show the HTTP reply header\n"
-"dump                 - show the HTTP reply header + body\n"
-"silent               - don't show status lines\n"
-"head                 - use the HEAD method instead of GET\n"
-"http10               - use HTTP/1.0 instead of HTTP/1.1\n"
-"host    <hostname>   - use <hostname> as Host: field in HTTP request\n"
-"timesplit            - show transfer times for different data chunks\n"
-"wait    <number>     - wait <number> seconds between requests. Default 1.\n"
-"clients <number>     - spawn <number> concurrent clients (via fork()).\n"
-"referer <url>        - Send the specified referer header.\n"
-"cookie  <name> <val> - Set cookie name=val, can be used multiple times.\n"
-"\nServer mode\n"
-"Usage: wbox servermode webroot <path> [serverport <portnumber> (def 8081)]\n"
-"\n"
-"-h or --help         - show this help.\n"
-"-v                   - show version.\n"
-"\nExamples\n\n"
-"wbox wikipedia.org                  (simplest, basic usage)\n"
-"wbox wikipedia.org 3 compr wait 0   (three requests, compression, no delay)\n"
-"wbox wikipedia.org 1 showhdr silent (just show the HTTP reply header)\n"
-"wbox wikipedia.org timesplit        (show splitted time information)\n"
-"wbox 1.2.3.4 host example.domain    (test a virtual domain at 1.2.3.4)\n"
-"wbox servermode webroot /tmp/mydocuments  (Try it with http://127.0.0.1:8081)\n"
-"\n"
-"More docs? there is a tutorial at http://hping.org/wbox\n"
-    );
-}
-
-static void sigHandler(int signum)
-{
-    if (signum == SIGINT) {
-        WBOX_NOTUSED(signum);
-        fprintf(stderr, " user terminated\n");
-        exit(WBOX_EXIT_SUCCESS);
-    }
 }
 
 /* return 0 for the parent, 1 for the child */
@@ -482,7 +465,7 @@ static int spawnChilds(int count)
     return 0;
 }
 
-static void renderTimesplit(replyinfo *ri) {
+static void printTimesplit(replyinfo *ri) {
     int j;
 
     for (j = 0; j < ri->tsamples; j++) {
@@ -493,109 +476,7 @@ static void renderTimesplit(replyinfo *ri) {
     }
 }
 
-static void parseArgs(char **argv, int argc, wconfig *conf) {
-    int j;
-
-    memset(conf,0,sizeof(*conf));
-    conf->wait = 1;
-    conf->maxreq = -1;
-    conf->serverport = WBOX_DEFAULT_SERVER_PORT;
-
-    if (argc < 2) {
-        wboxHelp();
-        exit(WBOX_EXIT_BADARGS);
-    }
-    if (!strcmp(argv[1],"-h") || !strcmp(argv[1],"--help")) {
-        wboxHelp();
-        exit(WBOX_EXIT_SUCCESS);
-    }
-    if (!strcmp(argv[1],"-v")) {
-        printf("WBox version %d\n", WBOX_VERSION);
-        exit(WBOX_EXIT_SUCCESS);
-    }
-    /* Server mode option must be at argv[1] ... */
-    if (!strcmp(argv[1],"servermode")) conf->servermode = 1;
-
-    /* Make sure it's possible to call wbox with every kind
-     * of argument as url including "-h", using:
-     * 
-     *   wbox -- -h
-     *
-     * Hardly useful but there must be a way to do this for
-     * the user.
-    */
-    conf->url = argv[1];
-    if (argc > 2 && !strcmp(argv[1],"--")) {
-        argv++;
-        argc--;
-        conf->url = argv[1];
-    }
-
-    /* Option parsing, in a more discorsive way compared to
-     * the usual unix switches */
-    for(j = 2; j < argc; j++) {
-        int next = (j+1 != argc);
-        int leftargs = argc-(j+1);
-        if (!strcmp(argv[j],"dump")) {
-            conf->dump=1;
-        } else if (!strcmp(argv[j],"compr")) {
-            conf->compr=1;
-        } else if (!strcmp(argv[j],"head")) {
-            conf->head=1;
-        } else if (!strcmp(argv[j],"timesplit")) {
-            conf->timesplit=1;
-        } else if (!strcmp(argv[j],"showhdr")) {
-            conf->showhdr=1;
-        } else if (!strcmp(argv[j],"silent")) {
-            conf->silent=1;
-        } else if (!strcmp(argv[j],"http10")) {
-            conf->http10=1;
-        } else if (next && !strcmp(argv[j],"host")) {
-            j++;
-            conf->host = argv[j];
-        } else if (next && !strcmp(argv[j],"wait")) {
-            j++;
-            conf->wait = atoi(argv[j]);
-        } else if (next && !strcmp(argv[j],"clients")) {
-            j++;
-            conf->clients = atoi(argv[j]);
-        } else if (next && !strcmp(argv[j],"referer")) {
-            j++;
-            conf->referer = argv[j];
-        } else if (leftargs >= 2 && !strcmp(argv[j],"cookie")) {
-            if (conf->cookies < WBOX_COOKIES_MAX) {
-                conf->cookie[conf->cookies].name = argv[j+1];
-                conf->cookie[conf->cookies].value = argv[j+2];
-                conf->cookies++;
-            }
-            j += 2;
-        } else if (next && !strcmp(argv[j],"webroot")) {
-            j++;
-            conf->webroot = argv[j];
-        } else if (next && !strcmp(argv[j],"serverport")) {
-            j++;
-            conf->serverport = atoi(argv[j]);
-        } else if (!strcmp(argv[j],"-h") ||
-                   !strcmp(argv[j],"--help")) {
-            wboxHelp();
-            exit(WBOX_EXIT_SUCCESS);
-        } else if (strisnumber(argv[j]) && atoi(argv[j]) > 0) {
-            conf->maxreq = atoi(argv[j]);
-        } else {
-            fprintf(stderr, "\n * Wrong option or params: %s\n\n", argv[j]);
-            wboxHelp();
-            exit(WBOX_EXIT_BADARGS);
-        }
-    }
-}
-
-static void setlowercase(char *p) {
-    while(*p) {
-        *p = tolower(*p);
-        p++;
-    }
-}
-
+/* --------------------------------- HTTP server ---------------------------- */
 static int parseRequest(char *req, reqinfo *ri) {
     char *copy, *r;
     char *p;
@@ -780,7 +661,7 @@ static char *sdscaturl(char *d, char *s) {
     return d;
 }
 
-static char *createDirListing(char *path) {
+static char *createDirListing(char *path, char *webpath) {
     DIR *d;
     struct dirent *de;
     struct stat sbuf;
@@ -793,7 +674,7 @@ static char *createDirListing(char *path) {
 
     b = sdsnew(htmlheader);
     b = sdscat(b,"<h1>Index of ");
-    b = sdscatentities(b,path);
+    b = sdscatentities(b,webpath);
     b = sdscat(b,"</h1>\n<table class=\"dirindex\">");
     for (onlydirs = 1; onlydirs >= 0; onlydirs--) {
         while((de = readdir(d))) {
@@ -953,7 +834,7 @@ static void serverModeChild(int s, char *ip, int port, wconfig *conf) {
     if (stat(fullpath,&sbuf) == -1) goto cleanup;
     if (S_ISDIR(sbuf.st_mode)) {
         /* Directory listing */
-        document = createDirListing(fullpath);
+        document = createDirListing(fullpath,ri.file);
         reply = createHttpReply(&ri,"200","OK","text/html",sdslen(document));
         anetWrite(s,reply,sdslen(reply));
         anetWrite(s,document,sdslen(document));
@@ -1019,10 +900,17 @@ static void serverMode(wconfig *conf) {
             fprintf(stderr, "Warning, accepting client: %s\n", err);
             continue;
         }
+        if (conf->activeclients == conf->maxclients) {
+            printf("%s:%d closing connection! max number of clients reached (tune this using the maxclients <number> option)\n",clientip,clientport);
+            close(fd);
+            continue;
+        }
         if (!conf->silent)
             printf("%s:%d connected\n",clientip,clientport);
+        conf->activeclients++;
         pid = fork();
         if (pid == -1) {
+            conf->activeclients--;
             perror("fork");
             close(fd);
             continue;
@@ -1039,6 +927,192 @@ static void serverMode(wconfig *conf) {
     }
 }
 
+/* --------------------------------- Main() & co ---------------------------- */
+static void wboxHelp(void) {
+    printf(
+"Usage: wbox <url> [options ...]\n\n"
+"options:\n\n"
+"<number>             - stop after <number> requests\n"
+"compr                - send Accept-Encoding: gzip,deflate in request\n"
+"showhdr              - show the HTTP reply header\n"
+"dump                 - show the HTTP reply header + body\n"
+"silent               - don't show status lines\n"
+"head                 - use the HEAD method instead of GET\n"
+"http10               - use HTTP/1.0 instead of HTTP/1.1\n"
+"close                - close the connection after reading few bytes\n"
+"host    <hostname>   - use <hostname> as Host: field in HTTP request\n"
+"timesplit            - show transfer times for different data chunks\n"
+"wait    <number>     - wait <number> seconds between requests. Default 1.\n"
+"clients <number>     - spawn <number> concurrent clients (via fork()).\n"
+"referer <url>        - Send the specified referer header.\n"
+"cookie  <name> <val> - Set cookie name=val, can be used multiple times.\n"
+"-h or --help         - show this help.\n"
+"-v                   - show version.\n"
+"\nSERVER MODE\n\n"
+"Usage: wbox servermode webroot <path> [serverport <portnumber> (def 8081)]\n\n"
+"options:\n\n"
+"maxclients <number>  - Max concurrent clients in server mode (default 20).\n"
+"\nEXAMPLES\n\n"
+"wbox wikipedia.org                  (simplest, basic usage)\n"
+"wbox wikipedia.org 3 compr wait 0   (three requests, compression, no delay)\n"
+"wbox wikipedia.org 1 showhdr silent (just show the HTTP reply header)\n"
+"wbox wikipedia.org timesplit        (show splitted time information)\n"
+"wbox 1.2.3.4 host example.domain    (test a virtual domain at 1.2.3.4)\n"
+"wbox servermode webroot /tmp/mydocuments  (Try it with http://127.0.0.1:8081)\n"
+"\n"
+"More docs? there is a tutorial at http://hping.org/wbox\n"
+    );
+}
+
+static void printStats(void) {
+    printf("--- %d replies received",conf.timesum_samples);
+    if (conf.timesum_samples) {
+        printf(", time min/avg/max = %d/%.2f/%d",
+            conf.mintime,
+            (float)(conf.timesum/conf.timesum_samples),
+            conf.maxtime);
+    }
+    printf(" ---\n");
+}
+
+static void sigHandler(int signum)
+{
+    if (signum == SIGINT) {
+        WBOX_NOTUSED(signum);
+        if (!conf.silent) {
+            printf("\n");
+            printStats();
+            printf("\n");
+        }
+        exit(WBOX_EXIT_SUCCESS);
+    } else if (signum == SIGCHLD) {
+        int status;
+        while (waitpid(-1,&status,WNOHANG) > 0)
+            conf.activeclients--;
+        if (!conf.silent && conf.servermode)
+            printf("%d active clients\n", conf.activeclients);
+    }
+}
+
+static void parseArgs(char **argv, int argc, wconfig *conf) {
+    int j;
+
+    memset(conf,0,sizeof(*conf));
+    conf->wait = 1;
+    conf->maxreq = -1;
+    conf->serverport = WBOX_DEFAULT_SERVER_PORT;
+    conf->maxclients = WBOX_DEFAULT_MAX_CLIENTS;
+
+    if (argc < 2) {
+        wboxHelp();
+        exit(WBOX_EXIT_BADARGS);
+    }
+    if (!strcmp(argv[1],"-h") || !strcmp(argv[1],"--help")) {
+        wboxHelp();
+        exit(WBOX_EXIT_SUCCESS);
+    }
+    if (!strcmp(argv[1],"-v")) {
+        printf("WBox version %d\n", WBOX_VERSION);
+        exit(WBOX_EXIT_SUCCESS);
+    }
+    /* Server mode option must be at argv[1] ... */
+    if (!strcmp(argv[1],"servermode")) conf->servermode = 1;
+
+    /* Make sure it's possible to call wbox with every kind
+     * of argument as url including "-h", using:
+     * 
+     *   wbox -- -h
+     *
+     * Hardly useful but there must be a way to do this for
+     * the user.
+    */
+    conf->url = argv[1];
+    if (argc > 2 && !strcmp(argv[1],"--")) {
+        argv++;
+        argc--;
+        conf->url = argv[1];
+    }
+
+    /* Option parsing, in a more discorsive way compared to
+     * the usual unix switches */
+    for(j = 2; j < argc; j++) {
+        int next = (j+1 != argc);
+        int leftargs = argc-(j+1);
+        if (!strcmp(argv[j],"dump")) {
+            conf->dump=1;
+        } else if (!strcmp(argv[j],"compr")) {
+            conf->compr=1;
+        } else if (!strcmp(argv[j],"head")) {
+            conf->head=1;
+        } else if (!strcmp(argv[j],"timesplit")) {
+            conf->timesplit=1;
+        } else if (!strcmp(argv[j],"showhdr")) {
+            conf->showhdr=1;
+        } else if (!strcmp(argv[j],"silent")) {
+            conf->silent=1;
+        } else if (!strcmp(argv[j],"http10")) {
+            conf->http10=1;
+        } else if (!strcmp(argv[j],"close")) {
+            conf->close=1;
+        } else if (next && !strcmp(argv[j],"host")) {
+            j++;
+            conf->host = argv[j];
+        } else if (next && !strcmp(argv[j],"wait")) {
+            j++;
+            conf->wait = atoi(argv[j]);
+        } else if (next && !strcmp(argv[j],"clients")) {
+            j++;
+            conf->clients = atoi(argv[j]);
+        } else if (next && !strcmp(argv[j],"referer")) {
+            j++;
+            conf->referer = argv[j];
+        } else if (leftargs >= 2 && !strcmp(argv[j],"cookie")) {
+            if (conf->cookies < WBOX_COOKIES_MAX) {
+                conf->cookie[conf->cookies].name = argv[j+1];
+                conf->cookie[conf->cookies].value = argv[j+2];
+                conf->cookies++;
+            }
+            j += 2;
+        } else if (next && !strcmp(argv[j],"webroot")) {
+            j++;
+            conf->webroot = argv[j];
+        } else if (next && !strcmp(argv[j],"serverport")) {
+            j++;
+            conf->serverport = atoi(argv[j]);
+        } else if (next && !strcmp(argv[j],"maxclients")) {
+            j++;
+            conf->maxclients = atoi(argv[j]);
+        } else if (!strcmp(argv[j],"-h") ||
+                   !strcmp(argv[j],"--help")) {
+            wboxHelp();
+            exit(WBOX_EXIT_SUCCESS);
+        } else if (strisnumber(argv[j]) && atoi(argv[j]) > 0) {
+            conf->maxreq = atoi(argv[j]);
+        } else {
+            fprintf(stderr, "\n * Wrong option or params: %s\n\n", argv[j]);
+            wboxHelp();
+            exit(WBOX_EXIT_BADARGS);
+        }
+    }
+}
+
+static void printReplyStatus(int reqid, replyinfo *oldri, replyinfo *ri) {
+    /* Print status line */
+    printf(WBOX_ANSI_CLEARLINE);
+    /* hostname id */
+    printf("%d. %d %s",reqid,ri->code,ri->reason ? ri->reason : "()");
+    /* reply length */
+    if (reqid != 0 && oldri->replylen != ri->replylen)
+        printf("    (%d)",ri->replylen);
+    else
+        printf("    %d",ri->replylen);
+    printf(" bytes");
+    /* request time */
+    printf("    %d ms",ri->time);
+    if (ri->compr) printf("    compr");
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     char err[ANET_ERR_LEN];
@@ -1046,10 +1120,12 @@ int main(int argc, char **argv)
     int reqid = 0;
     replyinfo ri, oldri;
     urlinfo ui;
-    wconfig conf;
 
     setlocale(LC_ALL,"C");
+    Signal(SIGCHLD,sigHandler);
+    Signal(SIGPIPE,sigHandler);
     parseArgs(argv,argc,&conf);
+
     /* Start in server mode if needed */
     if (conf.servermode) serverMode(&conf);
 
@@ -1072,8 +1148,6 @@ int main(int argc, char **argv)
         printf("\n");
     }
 
-    Signal(SIGCHLD,sigHandler);
-    Signal(SIGPIPE,sigHandler);
     if (conf.clients > 1) {
         if (spawnChilds(conf.clients-1)) {
             /* Childs specific code */
@@ -1093,22 +1167,17 @@ int main(int argc, char **argv)
 
         /* Request */
         httpRequest(&ri,ip,&ui,&conf);
+        conf.timesum += ri.time;
+        conf.timesum_samples++;
+        if (reqid == 0) {
+            conf.mintime = conf.maxtime = ri.time;
+        } else {
+            if (conf.mintime > ri.time) conf.mintime = ri.time;
+            if (conf.maxtime < ri.time) conf.maxtime = ri.time;
+        }
         if (!conf.silent) {
-            /* Print status line */
-            printf(WBOX_ANSI_CLEARLINE);
-            /* hostname id */
-            printf("%d. %d %s",reqid,ri.code,ri.reason ? ri.reason : "()");
-            /* reply length */
-            if (reqid != 0 && oldri.replylen != ri.replylen)
-                printf("    (%d)",ri.replylen);
-            else
-                printf("    %d",ri.replylen);
-            printf(" bytes");
-            /* request time */
-            printf("    %d ms",ri.time);
-            if (ri.compr) printf("    compr");
-            printf("\n");
-            if (conf.timesplit) renderTimesplit(&ri);
+            printReplyStatus(reqid,&oldri,&ri);
+            if (conf.timesplit) printTimesplit(&ri);
         }
         reqid++;
         freeReplyInfo(&oldri);
@@ -1119,5 +1188,6 @@ int main(int argc, char **argv)
     }
     freeUrl(&ui);
     freeReplyInfo(&oldri);
+    if (!conf.silent) printStats();
     return 0;
 }

@@ -1,0 +1,13 @@
+WBox changelog
+
+> WBox 4
+. option "maxclients" to set max number of concurrent clients in server mode.
+. option "close" to close the connection after the few block of data was
+received. This is useful to check what happens on EOF from client conditions
+in web applications, to test the latency aspect against big pages, and so on.
+. min/avg/max time statistics on Ctrl+C or termination
+. "Index of ..." no longer expose the real directory path on the filesystem
+. source code cleanup
+. Many fixes, including no more defunct processes in server mode.
+
+> WBox 3,2,1 ... sorry, file created starting from version 4 ;)
