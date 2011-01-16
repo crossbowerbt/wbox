@@ -10,5 +10,8 @@ int anetTcpNoDelay(char *err, int fd);
 int anetTcpConnect(char *err, char *addr, int port);
 int anetRead(int fd, void *buf, int count);
 int anetResolve(char *err, char *host, char *ipbuf);
+int anetTcpServer(char *err, int port, char *bindaddr);
+int anetAccept(char *err, int serversock, char *ip, int *port);
+int anetWrite(int fd, void *buf, int count);
 
 #endif

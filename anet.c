@@ -105,7 +105,7 @@ int anetTcpConnect(char *err, char *addr, int port)
     return s;
 }
 
-/* Like read but make sure 'count' is read before to return
+/* Like read(2) but make sure 'count' is read before to return
  * (unless error or EOF condition is encountered) */
 int anetRead(int fd, void *buf, int count)
 {
@@ -118,4 +118,75 @@ int anetRead(int fd, void *buf, int count)
         buf += nread;
     }
     return totlen;
+}
+
+/* Like write(2) but make sure 'count' is read before to return
+ * (unless error is encountered) */
+int anetWrite(int fd, void *buf, int count)
+{
+    int nwritten, totlen = 0;
+    while(totlen != count) {
+        nwritten = write(fd,buf,count-totlen);
+        if (nwritten == 0) return totlen;
+        if (nwritten == -1) return -1;
+        totlen += nwritten;
+        buf += nwritten;
+    }
+    return totlen;
+}
+
+int anetTcpServer(char *err, int port, char *bindaddr)
+{
+    int s, on = 1;
+    struct sockaddr_in sa;
+    
+    if ((s = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        anetSetError(err, "socket: %s\n", strerror(errno));
+        return ANET_ERR;
+    }
+    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+        anetSetError(err, "setsockopt SO_REUSEADDR: %s\n", strerror(errno));
+        close(s);
+        return ANET_ERR;
+    }
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bindaddr) inet_aton(bindaddr, &sa.sin_addr);
+
+    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
+        anetSetError(err, "bind: %s\n", strerror(errno));
+        close(s);
+        return ANET_ERR;
+    }
+    if (listen(s, 5) == -1) {
+        anetSetError(err, "listen: %s\n", strerror(errno));
+        close(s);
+        return ANET_ERR;
+    }
+    return s;
+}
+
+int anetAccept(char *err, int serversock, char *ip, int *port)
+{
+    int fd;
+    struct sockaddr_in sa;
+    unsigned int saLen;
+
+    while(1) {
+        saLen = sizeof(sa);
+        fd = accept(serversock, (struct sockaddr*)&sa, &saLen);
+        if (fd == -1) {
+            if (errno == EINTR)
+                continue;
+            else {
+                anetSetError(err, "accept: %s\n", strerror(errno));
+                return ANET_ERR;
+            }
+        }
+        break;
+    }
+    if (ip) strcpy(ip,inet_ntoa(sa.sin_addr));
+    if (port) *port = ntohs(sa.sin_port);
+    return fd;
 }

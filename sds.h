@@ -51,5 +51,6 @@ char *sdscpy(char *s, char *t);
 char *sdscatprintf(char *s, const char *fmt, ...);
 char *sdstrim(char *s, const char *cset);
 char *sdsrange(char *s, long start, long end);
+void sdsupdatelen(char *s);
 
 #endif

@@ -38,7 +38,10 @@ char *sdsnewlen(void *init, size_t initlen) {
     if (sh == NULL) return NULL;
     sh->len = initlen;
     sh->free = 0;
-    if (initlen) memcpy(sh->buf, init, initlen);
+    if (initlen) {
+        if (init) memcpy(sh->buf, init, initlen);
+        else memset(sh->buf,0,initlen);
+    }
     sh->buf[initlen] = '\0';
     return (char*)sh->buf;
 }
@@ -58,12 +61,20 @@ char *sdsdup(char *s) {
 }
 
 void sdsfree(char *s) {
+    if (s == NULL) return;
     free(s-sizeof(struct sdshdr));
 }
 
 size_t sdsavail(char *s) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     return sh->free;
+}
+
+void sdsupdatelen(char *s) {
+    struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
+    int reallen = strlen(s);
+    sh->free += (sh->len-reallen);
+    sh->len = reallen;
 }
 
 static char *sdsMakeRoomFor(char *s, size_t addlen) {

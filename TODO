@@ -1,4 +1,32 @@
+TODO list for WBox
+
+== HTTP CLIENT MODE ==
+
+High priority
+
+. Ability to set cookies: cookie foo bar (even used multiple times)
+. $HOME/.wboxrc
 . Computer parsable output "type:reply|len:3234|time:3424|code:200..."
+. Write min/avg/max time on Ctrl+C and every N lines of output
+
+Low priority
+
 . Ability to follow links can be interesting, for example to generate a map
   of the site, check for broken links, and so on.
-. Servermode, wbox server:/tmp/webroot (will act as a minimal HTTP server)
+. "color" option to use terminal colors to make the output more readable
+
+== HTTP SERVER MODE ==
+
+High priority
+. Handle zero length (/proc filesystem) files
+
+Low priority
+. Ability to "bind" commands to specific urls. For example using something
+  like 'wbox servermode /tmp/foobar bindurl /uptime uptime" should show
+  the uptime command output accessing http://127.0.0.1:8081/uptime.
+  Multiple binds should be possible at the same time.
+. A special 'servertest' mode implementing a select(2) or pthread based
+  server with minimal overhead serving a static page (the user should
+  be able to set the length of the generated page). This mode should be
+  useful in order to benchmark a server theoretical limits serving
+  pages of the given size.
