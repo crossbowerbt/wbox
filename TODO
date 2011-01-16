@@ -1,0 +1,4 @@
+. Computer parsable output "type:reply|len:3234|time:3424|code:200..."
+. Ability to follow links can be interesting, for example to generate a map
+  of the site, check for broken links, and so on.
+. Servermode, wbox server:/tmp/webroot (will act as a minimal HTTP server)
