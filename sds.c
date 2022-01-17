@@ -136,14 +136,14 @@ char *sdscpy(char *s, char *t) {
 char *sdscatprintf(char *s, const char *fmt, ...) {
     va_list ap;
     char *buf, *t;
-    size_t buflen = 2;
+    size_t buflen = 128;
+    int nout;
 
     va_start(ap, fmt);
     while(1) {
         if ((buf = malloc(buflen)) == NULL) return NULL;
-        buf[buflen-2] = '\0';
-        vsnprintf(buf, buflen, fmt, ap);
-        if (buf[buflen-2] != '\0') {
+        nout = vsnprintf(buf, buflen, fmt, ap);
+        if (buflen <= nout) {
             free(buf);
             buflen *= 2;
             continue;
